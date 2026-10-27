@@ -31,6 +31,12 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.observability import (
+    annotate_schedule,
+    decode_request_finished,
+    kv_scheduler_event,
+    queued_request,
+)
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -1083,6 +1089,7 @@ class Scheduler(SchedulerInterface):
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
+                    kv_scheduler_event("kv_wait_started", request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     step_skipped_waiting.prepend_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
@@ -1310,6 +1317,7 @@ class Scheduler(SchedulerInterface):
         if self.defer_block_free and total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
 
+        annotate_schedule(scheduler_output, self.requests)
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
@@ -1975,6 +1983,8 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
+                    if new_token_ids:
+                        decode_request_finished(request, scheduler_output)
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
                     if (
                         prefill_stats is not None
@@ -2328,6 +2338,8 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+
+            queued_request(request)
             if self.connector is not None:
                 self.connector.on_new_request(request)
             if self.log_stats:
@@ -2741,7 +2753,8 @@ class Scheduler(SchedulerInterface):
         """
         assert self.connector is not None
 
-        if request.request_id in self.failed_recving_kv_req_ids:
+        kv_load_failed = request.request_id in self.failed_recving_kv_req_ids
+        if kv_load_failed:
             # Request had KV load failures; num_computed_tokens was already
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:
@@ -2772,6 +2785,9 @@ class Scheduler(SchedulerInterface):
             if request.num_computed_tokens == request.num_tokens:
                 request.num_computed_tokens = request.num_tokens - 1
 
+        kv_scheduler_event(
+            "kv_ready_for_decode", request, kv_load_failed=kv_load_failed
+        )
         self.finished_recving_kv_req_ids.remove(request.request_id)
 
     def _try_promote_blocked_waiting_request(self, request: Request) -> bool:

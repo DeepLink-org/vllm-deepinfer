@@ -34,6 +34,8 @@ CHECK_IMPORTS = {
             "tools/pre_commit/check_forbidden_imports.py."
         ),
         allowed_files={
+            # Trusted internal scheduler metadata serialization roundtrip.
+            "tests/v1/test_native_observability.py",
             # pickle
             "vllm/multimodal/hasher.py",
             "vllm/transformers_utils/config.py",

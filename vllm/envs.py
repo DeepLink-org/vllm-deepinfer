@@ -601,6 +601,8 @@ def _resolve_rust_cli_path() -> str | None:
 
 
 environment_variables: dict[str, Callable[[], Any]] = {
+    # Native observability file output; empty disables files without disabling metrics.
+    "VLLM_OBSERVABILITY_LOG_DIR": lambda: os.getenv("VLLM_OBSERVABILITY_LOG_DIR", ""),
     # ================== Installation Time Env Vars ==================
     # Target device of vLLM, supporting [cuda (by default),
     # rocm, cpu]
