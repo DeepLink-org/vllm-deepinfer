@@ -364,6 +364,14 @@ class NixlBaseConnectorWorker:
         )
         # Map of engine_id -> clock offset.
         self._engine_clock_offset: dict[EngineId, float] = {}
+        # PR #55471 adaptation: recovery state for pull peers whose local
+        # NIXL metadata was invalidated (e.g. UCX endpoint failure).
+        # Failed reads need a local metadata probe; invalid peers wait for
+        # drain, then are released so the next request re-handshakes.
+        self._failed_remote_engines: set[EngineId] = set()
+        self._invalid_remote_engines: set[EngineId] = set()
+        # Invalid engine -> (backoff, earliest release time).
+        self._invalid_engine_backoff: dict[EngineId, tuple[float, float]] = {}
 
         # Metadata.
         self.engine_id: EngineId = engine_id
@@ -2062,6 +2070,9 @@ class NixlBaseConnectorWorker:
         to track which workers are done.
         """
         assert self.transfer_topo is not None
+        # PR #55471 adaptation: probe failed pull peers; release locally
+        # invalid ones once drained so the next request re-handshakes.
+        self._recover_invalid_remote_engines()
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
@@ -2285,6 +2296,13 @@ class NixlBaseConnectorWorker:
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
+        # PR #55471 adaptation: track the pull peer for a local-metadata probe.
+        if (
+            self._TRANSFER_MODE == "pull"
+            and meta is not None
+            and meta.remote is not None
+        ):
+            self._failed_remote_engines.add(meta.remote.engine_id)
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """
@@ -2532,6 +2550,89 @@ class NixlBaseConnectorWorker:
                 break
         return result
 
+    def _recover_invalid_remote_engines(self) -> None:
+        """PR #55471 adaptation: recover pull peers with invalidated metadata.
+
+        Failed reads schedule a local-metadata probe; peers whose native
+        metadata is gone are marked invalid and released once their reads
+        drain, so the next request re-handshakes instead of failing forever.
+        """
+        if self._TRANSFER_MODE != "pull":
+            return
+        if not self._failed_remote_engines and not self._invalid_remote_engines:
+            return
+        # A background handshake may be loading native metadata with the GIL
+        # released. Defer probing and cleanup until it has finished.
+        with self._handshake_lock:
+            if self._handshake_futures:
+                return
+        now = time.perf_counter()
+        for engine_id in list(
+            self._failed_remote_engines - self._invalid_remote_engines
+        ):
+            agents = self._remote_agents.get(engine_id, {}).values()
+            try:
+                # No descriptors: query local existence, not peer health.
+                if not all(map(self.nixl_wrapper.check_remote_metadata, agents)):
+                    self._mark_remote_engine_invalid(engine_id, now)
+            except Exception:
+                logger.warning(
+                    "Could not check local NIXL metadata for engine %s.",
+                    engine_id,
+                    exc_info=True,
+                )
+        self._failed_remote_engines.clear()
+        # Invalid peers reject new reads until their backoff has elapsed and
+        # all their reads have drained; then release so we re-handshake.
+        releasable = {
+            engine_id
+            for engine_id in self._invalid_remote_engines
+            if self._invalid_engine_backoff.get(engine_id, (0.0, 0.0))[1] <= now
+        }
+        if not releasable:
+            return
+        busy = {
+            meta.remote.engine_id
+            for meta in self._recving_metadata.values()
+            if meta.remote is not None
+        }
+        inflight = {
+            meta.remote.engine_id
+            for req_id, handles in self._recving_transfers.items()
+            if handles
+            for meta in [self._recving_metadata.get(req_id)]
+            if meta is not None and meta.remote is not None
+        }
+        for engine_id in releasable - busy - inflight:
+            self._cleanup_remote_engine(engine_id, log_eviction=False)
+            logger.info(
+                "Released NIXL state for locally invalid remote engine %s; "
+                "next request will re-handshake.",
+                engine_id,
+            )
+
+    def _mark_remote_engine_invalid(self, engine_id: EngineId, now: float) -> None:
+        """PR #55471 adaptation: schedule release of an engine whose local
+        NIXL metadata is gone. The first invalidation is released as soon as
+        reads drain; repeats back off exponentially (1s..60s)."""
+        min_backoff, max_backoff = 1.0, 60.0
+        # Forget engines that have stayed healthy long enough.
+        for eid, (_, release_at) in list(self._invalid_engine_backoff.items()):
+            if now - release_at > max_backoff:
+                del self._invalid_engine_backoff[eid]
+        prev = self._invalid_engine_backoff.get(engine_id)
+        backoff = 0.0
+        if prev is not None:
+            backoff = min(max(2 * prev[0], min_backoff), max_backoff)
+        self._invalid_engine_backoff[engine_id] = (backoff, now + backoff)
+        self._invalid_remote_engines.add(engine_id)
+        logger.warning(
+            "Local NIXL metadata for remote engine %s was invalidated; "
+            "re-handshaking after reads drain%s.",
+            engine_id,
+            f" and a {backoff:.0f}s backoff" if backoff else "",
+        )
+
     def _evict_stale_engines(self) -> None:
         """Scan for and evict remote engines that have exceeded their TTL.
 
@@ -2573,6 +2674,10 @@ class NixlBaseConnectorWorker:
             self.nixl_wrapper.release_dlist_handle(handle)
         for agent_name in self._remote_agents.pop(engine_id).values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
+
+        # PR #55471 adaptation: drop invalid-peer tracking for this engine.
+        self._failed_remote_engines.discard(engine_id)
+        self._invalid_remote_engines.discard(engine_id)
 
         self.kv_caches_base_addr.pop(engine_id, None)
         self.dst_num_blocks.pop(engine_id, None)
