@@ -199,6 +199,9 @@ def _configure_vllm_root_logger() -> None:
 
     if logging_config:
         dictConfig(logging_config)
+        from vllm.observability import configure_logging
+
+        configure_logging()
 
 
 def init_logger(name: str) -> _VllmLogger:

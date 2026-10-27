@@ -66,6 +66,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.observability import kv_pull_finished
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import make_zmq_path
@@ -2100,10 +2101,12 @@ class NixlBaseConnectorWorker:
 
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
+        native_completed = []
         for req_id in done_recving:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
+            native_completed.append((req_id, meta, req_id in failed_recv_reqs))
 
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
@@ -2166,6 +2169,9 @@ class NixlBaseConnectorWorker:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
 
         self._sync_device_after_mamba_recv(done_recving, failed_recv_reqs)
+        if native_completed:
+            for request_id, meta, failed in native_completed:
+                kv_pull_finished(meta, request_id, self.tp_rank, failed)
 
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()

@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
 )
 from vllm.logger import init_logger
+from vllm.observability import context_fields, enabled, log_event
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -266,6 +267,13 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
             remote_num_tokens = request.num_computed_tokens
 
+        if delay_free_blocks and enabled():
+            log_event(
+                "kv_published",
+                **context_fields(request.trace_headers, request.request_id),
+                remote_engine_id=self.engine_id,
+                num_tokens=remote_num_tokens,
+            )
         return delay_free_blocks, dict(
             do_remote_prefill=is_p_node,
             do_remote_decode=is_d_node,

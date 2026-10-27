@@ -26,6 +26,7 @@ from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.observability import bind_engine_request
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
@@ -433,6 +434,8 @@ class AsyncLLM(EngineClient):
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
+
+        bind_engine_request(request)
         await self.engine_core.add_request_async(request)
 
         if self.log_requests:
@@ -785,6 +788,8 @@ class AsyncLLM(EngineClient):
             data_parallel_rank=data_parallel_rank,
             abort_immediately=True,
         )
+
+        bind_engine_request(request)
         await self.engine_core.add_request_async(request)
 
     async def pause_generation(

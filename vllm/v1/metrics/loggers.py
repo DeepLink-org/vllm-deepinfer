@@ -1219,6 +1219,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_inter_token_latency[engine_idx].observe(itl)
 
         for finished_request in iteration_stats.finished_requests:
+            from vllm.observability import record_engine_finished
+
+            record_engine_finished(finished_request, engine_idx)
             self.counter_request_success[finished_request.finish_reason][
                 engine_idx
             ].inc()

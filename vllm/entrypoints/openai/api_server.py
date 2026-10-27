@@ -323,6 +323,10 @@ def build_app(
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
 
+    from vllm.observability import RequestObservabilityMiddleware, enabled
+
+    if enabled():
+        app.add_middleware(RequestObservabilityMiddleware)
     app = sagemaker_standards_bootstrap(app)
     return app
 

@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
 )
 from vllm.logger import init_logger
+from vllm.observability import kv_pull_started
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -45,6 +46,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.reqs_to_recv.items():
+            kv_pull_started(meta, req_id, self.tp_rank)
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids, self._physical_blocks_per_logical_kv_block
             )
