@@ -825,6 +825,13 @@ class EngineCore:
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
+    def _finish_pause(self, clear_cache: bool) -> None:
+        # A completed pause promises an idle device: nothing else waits on
+        # the last dummy batch an idle DP rank launches.
+        self.model_executor.collective_rpc("synchronize_device")
+        if clear_cache:
+            self._reset_caches()
+
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> Future | None:
@@ -851,8 +858,7 @@ class EngineCore:
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
-        if clear_cache:
-            self._reset_caches()
+        self._finish_pause(clear_cache)
 
         return None
 
@@ -1900,8 +1906,7 @@ class EngineCoreProc(EngineCore):
             raise ValueError(f"Invalid pause mode: {mode}")
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
-            if clear_cache:
-                engine._reset_caches()
+            engine._finish_pause(clear_cache)
             future.set_result(None)
 
         if mode == "abort":
@@ -1914,8 +1919,7 @@ class EngineCoreProc(EngineCore):
         self.scheduler.set_pause_state(pause_state)
 
         if self._pause_complete():
-            if clear_cache:
-                self._reset_caches()
+            self._finish_pause(clear_cache)
             return None
 
         future = Future[Any]()
@@ -2150,6 +2154,7 @@ class DPEngineCoreProc(EngineCoreProc):
         # Loop until process is sent a SIGINT or SIGTERM
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
+            was_running = self.engines_running
             self._process_input_queue()
             # Publish request counts before and after GPU step to ensure freshness.
             self._maybe_publish_request_counts()
@@ -2210,6 +2215,19 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Increment wave count and reset step counter.
                 self.current_wave += 1
                 self.step_counter = 0
+            elif (
+                not was_running
+                and self.has_coordinator
+                and self.dp_rank == 0
+                and not self.pending_pause
+            ):
+                # Mirror of the wave_complete notification above: the
+                # coordinator must observe this edge too rather than assume
+                # that a START_DP_WAVE it sent was acted upon, since a paused
+                # engine discards it.
+                self.output_queue.put_nowait(
+                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
+                )
 
         raise SystemExit
 

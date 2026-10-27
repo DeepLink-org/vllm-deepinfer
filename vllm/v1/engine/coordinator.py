@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import faulthandler
 import multiprocessing
 import multiprocessing.connection
+import os
 import time
 import weakref
 
@@ -168,6 +170,14 @@ class DPCoordinatorProc:
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
     ):
+        fault_log_path = (
+            os.getenv("VLLM_DP_COORDINATOR_FAULT_LOG")
+            or f"/tmp/vllm_dp_coordinator_fault_{os.getpid()}.log"
+        )
+        faulthandler.enable(
+            file=open(fault_log_path, "a", buffering=1), all_threads=True
+        )
+        logger.info("DP Coordinator fault handler enabled: %s", fault_log_path)
         coordinator = DPCoordinatorProc(
             engine_count=engine_count,
             min_stats_update_interval_ms=min_stats_update_interval_ms,
@@ -182,7 +192,12 @@ class DPCoordinatorProc:
             )
         except KeyboardInterrupt:
             logger.info("DP Coordinator process exiting")
+        except BaseException:
+            logger.exception("DP Coordinator process crashed")
+            raise
         finally:
+            faulthandler.disable()
+            logger.info("DP Coordinator process exiting, pid=%d", os.getpid())
             if zmq_addr_pipe is not None:
                 zmq_addr_pipe.close()
 
@@ -358,8 +373,10 @@ class DPCoordinatorProc:
                                 # is handled by all the engines.
                                 engine_to_exclude = None
 
-                            engines_running = True
-                            wave_state_changed = True
+                            # engines_running is only set from the engines'
+                            # own notifications; a paused engine discards
+                            # START_DP_WAVE, so sending it is not evidence
+                            # that the engines are running.
                             self._send_start_wave(
                                 publish_back, current_wave, engine_to_exclude
                             )
