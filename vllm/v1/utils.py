@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import json
 import multiprocessing
+import os
 import threading
 import time
 import weakref
@@ -12,6 +13,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
+from pathlib import Path
 from multiprocessing.queues import Queue
 from typing import (
     TYPE_CHECKING,
@@ -570,6 +572,44 @@ def wait_for_completion_or_failure(
                 proc = sentinel_to_proc.pop(sentinel)
 
                 # Check if process exited with error
+                if proc is not None:
+                    try:
+                        process_group_id = os.getpgid(proc.pid)
+                        session_id = os.getsid(proc.pid)
+                    except ProcessLookupError:
+                        process_group_id = None
+                        session_id = None
+                    proc.join(timeout=10)
+                    if proc.exitcode is not None and proc.exitcode < 0:
+                        logger.error(
+                            "Process %s (PID: %d) terminated by signal %d",
+                            proc.name,
+                            proc.pid,
+                            -proc.exitcode,
+                        )
+                    proc_details = {}
+                    for name in ("stat", "status", "cmdline", "wchan"):
+                        try:
+                            proc_path = Path("/proc") / str(proc.pid) / name
+                            raw = proc_path.read_bytes().replace(b"\x00", b" ")
+                            proc_details[name] = raw.decode(
+                                "utf-8", errors="replace"
+                            ).strip()
+                        except (FileNotFoundError, ProcessLookupError, PermissionError):
+                            pass
+                    logger.error(
+                        "Terminated process details: name=%s pid=%d "
+                        "parent_pid=%d parent_ppid=%d pgid=%r sid=%r "
+                        "exitcode=%r proc_details=%r",
+                        proc.name,
+                        proc.pid,
+                        os.getpid(),
+                        os.getppid(),
+                        process_group_id,
+                        session_id,
+                        proc.exitcode,
+                        proc_details,
+                    )
                 if proc is not None and proc.exitcode != 0:
                     raise RuntimeError(
                         f"Process {proc.name} (PID: {proc.pid}) "
