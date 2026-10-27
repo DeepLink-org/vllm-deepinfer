@@ -5785,7 +5785,8 @@ class GPUModelRunner(
                 # This is the last chunk of prompt tokens to return.
                 num_logits = num_remaining_tokens
                 completed_prefill_reqs.append(req_id)
-                prompt_logprobs_dict[req_id] = logprobs_tensors
+                if num_logits > 0:
+                    prompt_logprobs_dict[req_id] = logprobs_tensors
 
             if num_logits <= 0:
                 # This can happen for the final chunk if we prefilled exactly
@@ -5830,7 +5831,8 @@ class GPUModelRunner(
         # Remove requests that have completed prefill from the batch
         # num_prompt_logprobs_dict.
         for req_id in completed_prefill_reqs:
-            del num_prompt_logprobs_dict[req_id]
+            if req_id in num_prompt_logprobs_dict:
+                del num_prompt_logprobs_dict[req_id]
             self.requests[req_id].in_progress_prompt_logprobs_cpu = None
 
         # Must synchronize the non-blocking GPU->CPU transfers.
