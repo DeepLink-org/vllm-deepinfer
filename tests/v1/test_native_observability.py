@@ -91,6 +91,10 @@ class NativeTests(unittest.TestCase):
         self.assertTrue(any("Traceback" in row["message"] for row in records))
 
     def test_retention_removes_only_native_prefix(self):
+        obs.runtime().close()
+        obs._runtime = None
+        os.environ["OBSERVABILITY_LOG_RETENTION_DAYS"] = "7"
+        obs.setting.cache_clear()
         directory = obs.runtime().directory
         directory.mkdir(parents=True, exist_ok=True)
         old = directory / "vllm.old.jsonl"
@@ -101,6 +105,28 @@ class NativeTests(unittest.TestCase):
         logging.getLogger("vllm.native-test").info("retention fixture")
         wait_for(lambda: not old.exists())
         self.assertTrue(other.exists())
+
+    def test_default_and_zero_retention_preserve_old_daily_files(self):
+        os.environ.pop("OBSERVABILITY_LOG_RETENTION_DAYS", None)
+        obs.setting.cache_clear()
+        self.assertEqual(obs.runtime().retention, 0)
+        directory = obs.runtime().directory
+        directory.mkdir(parents=True, exist_ok=True)
+        old = directory / "vllm.20000101T000000.0.jsonl"
+        old.write_text("{}\n")
+        os.utime(old, (time.time() - 30 * 86400,) * 2)
+        logging.getLogger("vllm.native-test").info("manual retention fixture")
+        self.records()
+        self.assertTrue(old.exists())
+        for value in ("0", "-1", "nan", "inf"):
+            with self.subTest(value=value):
+                os.environ["OBSERVABILITY_LOG_RETENTION_DAYS"] = value
+                obs.setting.cache_clear()
+                if value == "0":
+                    self.assertEqual(obs.setting("LOG_RETENTION_DAYS", 0), 0)
+                else:
+                    with self.assertRaises(ValueError):
+                        obs.setting("LOG_RETENTION_DAYS", 0)
 
     def test_fork_reinitializes_writer(self):
         parent = os.getpid()

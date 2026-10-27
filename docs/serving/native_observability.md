@@ -16,12 +16,15 @@ Optional settings:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `OBSERVABILITY_ROLE` | `vllm` | Role label and directory, e.g. `p0` or `d0` |
-| `OBSERVABILITY_LOG_RETENTION_DAYS` | `7` | File retention by modification time |
+| `OBSERVABILITY_LOG_RETENTION_DAYS` | `0` | Manual deletion; positive days enable automatic cleanup |
 | `OBSERVABILITY_LOG_MAX_MB` | `256` | Per-segment rotation threshold in MiB |
 | `OBSERVABILITY_ALERT_CONFIG` | Unset | Private JSON alert configuration |
 
-Files rotate on UTC date changes and size. Retention does not cap the total size
-of the shared directory. Logging uses bounded background queues and buffered
+Files rotate on UTC date changes and size. Filenames contain the UTC date; a
+busy day can have multiple segments. By default no files are deleted: operators
+can manually remove files older than seven days according to available space.
+Optionally set `OBSERVABILITY_LOG_RETENTION_DAYS=7` for automatic cleanup by
+modification time. Retention does not cap the total size of the shared directory. Logging uses bounded background queues and buffered
 writes; queue overflow drops records and increments health counters.
 
 The Router supplies the canonical `request_id` through

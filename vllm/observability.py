@@ -124,8 +124,10 @@ def enabled():
 @cache
 def setting(name, default):
     value = float(os.getenv("OBSERVABILITY_" + name, default))
-    if not value > 0 or value == float("inf"):
-        raise ValueError(f"OBSERVABILITY_{name} must be finite and positive")
+    valid = value >= 0 if name == "LOG_RETENTION_DAYS" else value > 0
+    if not valid or value == float("inf"):
+        minimum = "nonnegative" if name == "LOG_RETENTION_DAYS" else "positive"
+        raise ValueError(f"OBSERVABILITY_{name} must be finite and {minimum}")
     return value
 
 
@@ -165,7 +167,7 @@ class Runtime:
             else os.getenv("VLLM_OBSERVABILITY_LOG_DIR")
         )
         self.directory = Path(root) / socket.gethostname() / self.role if root else None
-        self.retention = setting("LOG_RETENTION_DAYS", 7) * 86400
+        self.retention = setting("LOG_RETENTION_DAYS", 0) * 86400
         self.max_bytes = setting("LOG_MAX_MB", 256) * 1024 * 1024
         self.interval = setting("LOG_INTERVAL_S", 60)
         self.flush_interval = setting("LOG_FLUSH_MS", 50) / 1000
@@ -417,7 +419,11 @@ class Runtime:
                     ):
                         stream.flush()
                         pending_flush = False
-                    if self.directory and time.monotonic() - housekeeping > 60:
+                    if (
+                        self.retention > 0
+                        and self.directory
+                        and time.monotonic() - housekeeping > 60
+                    ):
                         housekeeping = time.monotonic()
                         if self.directory.exists():
                             for file in self.directory.glob("vllm.*.jsonl"):
