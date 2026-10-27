@@ -77,6 +77,19 @@ decode = client.chat.completions.create(
 )
 ```
 
+## Prefix cache usage
+
+For remote prefill handoffs, the prefill instance includes its actual cache hit
+count as `remote_prefill_cached_tokens` in `kv_transfer_params`. The router must
+forward this field with the other transfer parameters to the decode instance.
+The decode response then reports this count in
+`usage.prompt_tokens_details.cached_tokens`, including streaming responses.
+A cold prefill reports zero even though its KV cache is transferred to decode.
+
+If this field is absent, the decode instance retains its existing accounting,
+which includes KV tokens received from the prefill instance. Internal scheduler
+and KV transfer statistics are unchanged.
+
 ## Development
 
 We implement disaggregated prefilling by running 2 vLLM instances. One for prefill (we call it prefill instance) and one for decode (we call it decode instance), and then use a connector to transfer the prefill KV caches and results from prefill instance to decode instance.

@@ -22,12 +22,13 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
 )
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import IterationStats, PrefillStats, SchedulerStats
 
 
 def _ref_convert_id_to_token(
@@ -1418,3 +1419,69 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize("output_kind", list(RequestOutputKind))
+@pytest.mark.parametrize(
+    "remote_prefill,cached_tokens,expected",
+    [(True, 0, 0), (True, 5, 5), (True, None, 7), (False, 5, 7)],
+)
+def test_remote_prefill_cached_tokens_override(
+    output_kind: RequestOutputKind,
+    remote_prefill: bool,
+    cached_tokens: int | None,
+    expected: int,
+):
+    kv_transfer_params: dict[str, bool | int] = {"do_remote_prefill": remote_prefill}
+    if cached_tokens is not None:
+        kv_transfer_params["remote_prefill_cached_tokens"] = cached_tokens
+    request = EngineCoreRequest(
+        request_id="request-0-int",
+        external_req_id="request-0",
+        prompt_token_ids=list(range(8)),
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            detokenize=False,
+            output_kind=output_kind,
+            extra_args={"kv_transfer_params": kv_transfer_params},
+        ),
+        pooling_params=None,
+    )
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    output_processor.add_request(request, prompt=None)
+    # The connector can clear the flag after request state captures the count.
+    kv_transfer_params["do_remote_prefill"] = False
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=8,
+        num_local_cached_tokens=0,
+        num_external_cached_tokens=7,
+    )
+    first = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-0-int",
+                new_token_ids=[42],
+                prefill_stats=prefill_stats,
+            )
+        ]
+    )
+    final = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-0-int",
+                new_token_ids=[43],
+                finish_reason=FinishReason.STOP,
+            )
+        ]
+    )
+    assert final.request_outputs[-1].finished
+    for output in first.request_outputs + final.request_outputs:
+        assert output.num_cached_tokens == expected
+    # Internal accounting still includes transferred KV tokens.
+    assert prefill_stats.num_cached_tokens == 7
+    assert prefill_stats.num_external_cached_tokens == 7
